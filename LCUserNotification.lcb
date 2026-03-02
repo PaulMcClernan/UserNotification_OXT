@@ -11,23 +11,52 @@ metadata platforms is "mac"
 
 --------------------- foreign handlers
 
--- UNUserNotificationCenter API (macOS 10.14+)
-private foreign handler UNUserNotificationCenterCurrentNotificationCenter() returns ObjcId binds to "objc:UNUserNotificationCenter.+currentNotificationCenter"
-private foreign handler UNMutableNotificationContentAlloc() returns ObjcRetainedId binds to "objc:UNMutableNotificationContent.+alloc"
-private foreign handler UNMutableNotificationContentInit(in AnInstance as ObjcId) returns ObjcId binds to "objc:UNMutableNotificationContent.-init"
-private foreign handler UNMutableNotificationContentSetProperty(in Obj as ObjcId, in PValue as ObjcId, in PProp as ObjcId) returns nothing binds to "objc:UNMutableNotificationContent.-setValue:forKey:"
-private foreign handler UNTimeIntervalNotificationTriggerWithTimeInterval(in TimeInterval as CDouble, in Repeats as CBool) returns ObjcId binds to "objc:UNTimeIntervalNotificationTrigger.+triggerWithTimeInterval:repeats:"
-private foreign handler UNNotificationRequestAllocWithIdentifier(in Identifier as ObjcId, in Content as ObjcId, in Trigger as ObjcId) returns ObjcId binds to "objc:UNNotificationRequest.+requestWithIdentifier:content:trigger:"
-private foreign handler UNUserNotificationCenterAddNotificationRequest(in Center as ObjcId, in Request as ObjcId, in CompletionHandler as optional ObjcBlockPointer) returns nothing binds to "objc:UNUserNotificationCenter.-addNotificationRequest:withCompletionHandler:"
-private foreign handler UNUserNotificationCenterRequestAuthorization(in Center as ObjcId, in Options as CSInt, in CompletionHandler as optional ObjcBlockPointer) returns nothing binds to "objc:UNUserNotificationCenter.-requestAuthorizationWithOptions:completionHandler:"
+-- UNUserNotificationCenter is the modern notification API, available on macOS 10.14+.
+-- It requires the app to have a bundle identifier and notification permission granted by the user.
 
--- Fallback to NSUserNotificationCenter for older macOS versions
+-- Returns the shared notification center singleton for this app
+private foreign handler UNUserNotificationCenterCurrentNotificationCenter() returns ObjcId binds to "objc:UserNotifications.framework>UNUserNotificationCenter.+currentNotificationCenter"
+
+-- Allocs and inits a mutable notification content object, which holds the title, subtitle, and body
+private foreign handler UNMutableNotificationContentAlloc() returns ObjcRetainedId binds to "objc:UserNotifications.framework>UNMutableNotificationContent.+alloc"
+private foreign handler UNMutableNotificationContentInit(in AnInstance as ObjcId) returns ObjcId binds to "objc:UserNotifications.framework>UNMutableNotificationContent.-init"
+
+-- Sets a property on the content object using KVC (key-value coding).
+-- Used to set "title", "subtitle", and "body" string properties.
+private foreign handler UNMutableNotificationContentSetProperty(in Obj as ObjcId, in PValue as ObjcId, in PProp as ObjcId) returns nothing binds to "objc:UserNotifications.framework>UNMutableNotificationContent.-setValue:forKey:"
+
+-- Creates a time-based trigger using a class factory method.
+-- TimeInterval is in seconds (CDouble); Repeats controls whether it fires repeatedly.
+-- Note: must use CDouble (not CLong) as NSTimeInterval is a C double, and the factory
+-- method (+triggerWithTimeInterval:repeats:) must be used instead of alloc/init.
+private foreign handler UNTimeIntervalNotificationTriggerWithTimeInterval(in TimeInterval as CDouble, in Repeats as CBool) returns ObjcId binds to "objc:UserNotifications.framework>UNTimeIntervalNotificationTrigger.+triggerWithTimeInterval:repeats:"
+
+-- Creates a notification request combining a unique identifier, content, and trigger.
+-- Returns ObjcId (not ObjcRetainedId) because this is a factory method returning an autoreleased object.
+private foreign handler UNNotificationRequestAllocWithIdentifier(in Identifier as ObjcId, in Content as ObjcId, in Trigger as ObjcId) returns ObjcId binds to "objc:UserNotifications.framework>UNNotificationRequest.+requestWithIdentifier:content:trigger:"
+
+-- Schedules a notification request with the notification center.
+-- CompletionHandler must be a real ObjcBlockPointer (not nothing) to ensure reliable delivery.
+private foreign handler UNUserNotificationCenterAddNotificationRequest(in Center as ObjcId, in Request as ObjcId, in CompletionHandler as optional ObjcBlockPointer) returns nothing binds to "objc:UserNotifications.framework>UNUserNotificationCenter.-addNotificationRequest:withCompletionHandler:"
+
+-- Requests permission from the user to display notifications.
+-- Options is a bitmask: alert=4, sound=2, badge=1 (pass 7 for all three).
+-- Must be called before posting notifications, ideally at app startup (e.g. openStack).
+-- The completion block fires asynchronously once the user responds to the permission dialog.
+private foreign handler UNUserNotificationCenterRequestAuthorization(in Center as ObjcId, in Options as CSInt, in CompletionHandler as optional ObjcBlockPointer) returns nothing binds to "objc:UserNotifications.framework>UNUserNotificationCenter.-requestAuthorizationWithOptions:completionHandler:"
+
+
+-- NSUserNotificationCenter is the legacy notification API, deprecated in macOS 10.14
+-- and no longer functional on newer macOS versions. Kept here for reference only.
+
 private foreign handler NSUserNotificationCenterDefaultUserNotificationCenter() returns ObjcId binds to "objc:NSUserNotificationCenter.+defaultUserNotificationCenter"
 private foreign handler NSUserNotificationAlloc() returns ObjcRetainedId binds to "objc:NSUserNotification.+alloc"
 private foreign handler NSUserNotificationInit(in AnInstance as ObjcId) returns ObjcId binds to "objc:NSUserNotification.-init"
 private foreign handler NSUserNotificationSetProperty(in Obj as ObjcId, in PValue as ObjcId, in PProp as ObjcId) returns nothing binds to "objc:NSUserNotification.-setValue:forKey:"
 private foreign handler NSUserNotificationCenterDeliverNotification(in DefaultUserNotificationCenter as ObjcId, in ANSUserNotification as ObjcId) returns nothing binds to "objc:NSUserNotificationCenter.-deliverNotification:"
 
+-- NSDistributedNotificationCenter is declared here but unused. It is a system-wide
+-- notification bus for broadcasting messages between processes on the same machine.
 private foreign handler NSDistributedNotificationCenterDefaultCenter() returns ObjcId binds to "objc:NSDistributedNotificationCenter.+defaultCenter"
 private foreign handler NSDistributedNotificationCenterPostNotificationNameObject(in DefaultCenter as ObjcId, in NotificationName as ObjcId, in NotificationObject as ObjcId) returns nothing binds to "objc:NSDistributedNotificationCenter.-postNotificationName:object:"
 
@@ -35,19 +64,46 @@ private foreign handler NSDistributedNotificationCenterPostNotificationNameObjec
 
 --------------------- Block handlers
 
--- Block type and handler for addNotificationRequest completion: ^(NSError *error)
+-- LCB requires a handler type declaration and a matching handler implementation in order
+-- to create an Objective-C block pointer via CreateObjcBlockPointerFromHandler.
+-- The first parameter of both the type and the handler must always be ObjcBlockPointer
+-- (the block's own context pointer), followed by the block's actual parameters.
+-- The block pointer must be stored in a module-level variable to prevent it being
+-- garbage collected before the async callback fires.
+
+-- Completion block for addNotificationRequest:withCompletionHandler: — receives an NSError
+-- (or nothing on success). Logs any error to help diagnose delivery failures.
 public handler type AddNotificationCompletionBlock(in pContext as ObjcBlockPointer, in pError as optional ObjcId) returns nothing
 public handler AddNotificationCompletion(in pContext as ObjcBlockPointer, in pError as optional ObjcId) returns nothing
-	-- no-op: we don't need to handle the completion
+	if pError is not nothing then
+		unsafe
+			log StringFromNSString(NSErrorLocalizedDescription(pError))
+		end unsafe
+	else
+		log "UserNotification: request added successfully"
+	end if
 end handler
 
--- Block type and handler for requestAuthorization completion: ^(BOOL granted, NSError *error)
+-- Completion block for requestAuthorizationWithOptions:completionHandler: — receives a
+-- boolean indicating whether permission was granted, and an NSError if something went wrong.
 public handler type AuthorizationCompletionBlock(in pContext as ObjcBlockPointer, in pGranted as CBool, in pError as optional ObjcId) returns nothing
 public handler AuthorizationCompletion(in pContext as ObjcBlockPointer, in pGranted as CBool, in pError as optional ObjcId) returns nothing
-	-- no-op
+	if pGranted then
+		log "UserNotification: authorization granted"
+	else
+		log "UserNotification: authorization denied or failed"
+	end if
+	if pError is not nothing then
+		unsafe
+			log StringFromNSString(NSErrorLocalizedDescription(pError))
+		end unsafe
+	end if
 end handler
 
--- Module-level variables to keep blocks retained
+private foreign handler NSErrorLocalizedDescription(in Error as ObjcId) returns ObjcId binds to "objc:NSError.-localizedDescription"
+
+-- Module-level variables hold the block pointers, keeping them retained for the
+-- duration of the async callbacks.
 private variable sAddNotificationBlock as optional ObjcBlockPointer
 private variable sAuthorizationBlock as optional ObjcBlockPointer
 
@@ -55,13 +111,17 @@ private variable sAuthorizationBlock as optional ObjcBlockPointer
 
 --------------------- Public handlers
 
+-- RequestNotificationAuthorization
+-- Call this once at app startup (e.g. in an openStack handler) before posting any
+-- notifications. On first run this shows the system permission dialog. On subsequent
+-- runs it resolves immediately using the cached decision.
+-- Authorization options bitmask: alert=4, sound=2, badge=1 → combined value 7.
 public unsafe handler RequestNotificationAuthorization() returns nothing
 	if (the operating system is "mac") then
 		variable NotificationCenter as ObjcId
 		put UNUserNotificationCenterCurrentNotificationCenter() into NotificationCenter
 		if (NotificationCenter is not nothing) then
 			CreateObjcBlockPointerFromHandler(AuthorizationCompletion, sAuthorizationBlock)
-			-- Request alert=4, sound=2, badge=1
 			UNUserNotificationCenterRequestAuthorization(NotificationCenter, 7, sAuthorizationBlock)
 		end if
 	end if
@@ -69,18 +129,29 @@ end handler
 
 
 
+-- PostUserNotification
+-- Posts a local notification via UNUserNotificationCenter (macOS 10.14+).
+-- postTitle       - the bold heading line of the notification (required)
+-- subTitle        - a secondary heading shown below the title (optional)
+-- informativeText - the body text of the notification (optional)
+-- postIdentifier  - a unique string ID for this notification; if omitted a fixed default
+--                   is used, meaning repeated calls will replace the previous notification
+--                   rather than stacking
+--
+-- Requires RequestNotificationAuthorization to have been called first.
+-- Notifications are delivered after a 1-second delay via UNTimeIntervalNotificationTrigger.
 public unsafe handler PostUserNotification(in postTitle as String, in subTitle as String, in informativeText as optional String, in postIdentifier as optional String) returns nothing
 	if (the operating system is "mac") then
 		variable NotificationCenter as ObjcId
 		put UNUserNotificationCenterCurrentNotificationCenter() into NotificationCenter
 
 		if (NotificationCenter is not nothing) then
-			-- Create mutable notification content
+			-- Create and initialise a mutable content object to hold the notification payload
 			variable Content as ObjcObject
 			put UNMutableNotificationContentAlloc() into Content
 			put UNMutableNotificationContentInit(Content) into Content
 
-			-- Set notification properties
+			-- Set the title (required), subtitle, and body using KVC
 			UNMutableNotificationContentSetProperty(Content, StringToNSString(postTitle), StringToNSString("title"))
 
 			if (subTitle is not nothing) then
@@ -91,22 +162,25 @@ public unsafe handler PostUserNotification(in postTitle as String, in subTitle a
 				UNMutableNotificationContentSetProperty(Content, StringToNSString(informativeText), StringToNSString("body"))
 			end if
 
-			-- Create trigger (deliver after 1 second)
+			-- Create a trigger that fires after 1 second (the minimum allowed interval)
 			variable Trigger as ObjcId
 			put UNTimeIntervalNotificationTriggerWithTimeInterval(1.0, false) into Trigger
 
-			-- Create notification request with identifier
+			-- Use the supplied identifier, or fall back to a fixed default.
+			-- Note: reusing the same identifier replaces any pending notification with that ID.
 			variable Identifier as String
 			if (postIdentifier is not nothing) then
 				put postIdentifier into Identifier
 			else
-				put "org.openxtalk.notification" into Identifier
+				put "com.freelibs.notification" into Identifier
 			end if
 
+			-- Combine content, trigger, and identifier into a request object
 			variable Request as ObjcId
 			put UNNotificationRequestAllocWithIdentifier(StringToNSString(Identifier), Content, Trigger) into Request
 
-			-- Pass a real block (not nothing) to ensure delivery
+			-- Schedule the request. A real block pointer must be passed (not nothing)
+			-- to ensure reliable delivery on all macOS versions.
 			CreateObjcBlockPointerFromHandler(AddNotificationCompletion, sAddNotificationBlock)
 			UNUserNotificationCenterAddNotificationRequest(NotificationCenter, Request, sAddNotificationBlock)
 		end if
@@ -115,6 +189,10 @@ end handler
 
 
 
+-- PostUserNotificationLegacy
+-- Legacy implementation using the deprecated NSUserNotificationCenter API.
+-- This API was deprecated in macOS 10.14 and is non-functional on newer macOS versions.
+-- Retained here for reference but no longer called by PostUserNotification.
 private unsafe handler PostUserNotificationLegacy(in postTitle as String, in subTitle as String, in informativeText as optional String, in postIdentifier as optional String) returns nothing
 	variable DefaultUserNotificationCenter as ObjcId
 	put NSUserNotificationCenterDefaultUserNotificationCenter() into DefaultUserNotificationCenter
